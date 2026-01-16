@@ -1,0 +1,200 @@
+// --- CONFIGURATION ---
+const GH_CONFIG = {
+    owner: "yoshh1306it-netizen",
+    repo: "new-school-dashboard",
+    path: "data.json"
+};
+
+const DEFAULT_DATA = {
+    timeSettings: [
+        { p: 1, s: "08:50", e: "09:40" },
+        { p: 2, s: "09:50", e: "10:40" },
+        { p: 3, s: "10:50", e: "11:40" },
+        { p: 4, s: "11:50", e: "12:40" },
+        { p: 5, s: "13:30", e: "14:20" },
+        { p: 6, s: "14:30", e: "15:20" },
+        { p: 7, s: "15:30", e: "16:20" }
+    ],
+    schedule: {},
+    tests: []
+};
+
+// --- DATA MANAGER ---
+class DataManager {
+    constructor() {
+        this.adminData = JSON.parse(JSON.stringify(DEFAULT_DATA));
+        this.userData = this.loadLocal();
+    }
+
+    loadLocal() {
+        const saved = localStorage.getItem('school_user_data');
+        return saved ? JSON.parse(saved) : { classId: '21HR', todos: [] };
+    }
+
+    saveLocal() {
+        localStorage.setItem('school_user_data', JSON.stringify(this.userData));
+    }
+
+    async loadFromGitHub() {
+        try {
+            const url = `https://raw.githubusercontent.com/${GH_CONFIG.owner}/${GH_CONFIG.repo}/main/${GH_CONFIG.path}?t=${new Date().getTime()}`;
+            const res = await fetch(url);
+            if (res.ok) {
+                this.adminData = await res.json();
+                console.log("DB Loaded");
+            }
+        } catch (e) { console.error("DB Load Error", e); }
+    }
+
+    async saveToGitHub(token) {
+        const apiUrl = `https://api.github.com/repos/${GH_CONFIG.owner}/${GH_CONFIG.repo}/contents/${GH_CONFIG.path}`;
+        try {
+            const getRes = await fetch(apiUrl, { headers: { 'Authorization': `token ${token}` } });
+            const sha = getRes.ok ? (await getRes.json()).sha : null;
+            const content = btoa(unescape(encodeURIComponent(JSON.stringify(this.adminData, null, 2))));
+            
+            const res = await fetch(apiUrl, {
+                method: 'PUT',
+                headers: { 'Authorization': `token ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: "Update via Dashboard", content, sha })
+            });
+            return res.ok;
+        } catch (e) { return false; }
+    }
+}
+
+// --- POMODORO TIMER ---
+class Pomodoro {
+    constructor() {
+        this.timeLeft = 25 * 60;
+        this.timer = null;
+        this.isActive = false;
+        this.total = 25 * 60;
+    }
+
+    start() {
+        if (this.isActive) {
+            clearInterval(this.timer);
+            this.isActive = false;
+            document.getElementById('pomoStartBtn').innerHTML = '<i class="fa-solid fa-play"></i> 開始';
+        } else {
+            this.isActive = true;
+            document.getElementById('pomoStartBtn').innerHTML = '<i class="fa-solid fa-pause"></i> 一時停止';
+            this.timer = setInterval(() => {
+                this.timeLeft--;
+                this.updateUI();
+                if (this.timeLeft <= 0) {
+                    clearInterval(this.timer);
+                    alert("時間です！休憩しましょう。");
+                    this.reset();
+                }
+            }, 1000);
+        }
+    }
+
+    reset() {
+        clearInterval(this.timer);
+        this.isActive = false;
+        this.timeLeft = 25 * 60;
+        document.getElementById('pomoStartBtn').innerHTML = '<i class="fa-solid fa-play"></i> 開始';
+        this.updateUI();
+    }
+
+    updateUI() {
+        const min = Math.floor(this.timeLeft / 60);
+        const sec = this.timeLeft % 60;
+        document.getElementById('pomoTime').textContent = `${min}:${sec.toString().padStart(2, '0')}`;
+        const pct = ((this.total - this.timeLeft) / this.total) * 100;
+        document.getElementById('pomoProgress').style.width = `${pct}%`;
+    }
+}
+
+// --- APP CONTROLLER ---
+const data = new DataManager();
+const pomo = new Pomodoro();
+
+const app = {
+    init: async () => {
+        await data.loadFromGitHub();
+        app.setupEvents();
+        app.updateClock();
+        setInterval(app.updateClock, 1000);
+        app.renderDashboard();
+    },
+
+    navigate: (viewId) => {
+        document.querySelectorAll('.view-section').forEach(v => v.classList.remove('active'));
+        document.getElementById(`view-${viewId}`).classList.add('active');
+        if(viewId === 'dashboard') app.renderDashboard();
+    },
+
+    setupEvents: () => {
+        document.getElementById('userSettingsBtn').onclick = () => app.navigate('settings');
+        document.getElementById('adminLoginBtn').onclick = () => app.navigate('admin-login');
+        
+        document.getElementById('adminLoginSubmit').onclick = () => {
+            if(document.getElementById('adminPinInput').value === '1234') app.navigate('admin');
+            else alert("パスワードが違います");
+        };
+
+        document.getElementById('pomoStartBtn').onclick = () => pomo.start();
+        document.getElementById('pomoResetBtn').onclick = () => pomo.reset();
+
+        document.getElementById('addTodoBtn').onclick = app.addTodo;
+        
+        document.getElementById('saveAdminDataBtn').onclick = async () => {
+            const token = document.getElementById('ghToken').value;
+            if(!token) return alert("トークンが必要です");
+            const ok = await data.saveToGitHub(token);
+            if(ok) alert("GitHub DBを更新しました");
+            else alert("エラーが発生しました");
+        };
+    },
+
+    updateClock: () => {
+        const now = new Date();
+        document.getElementById('clockTime').textContent = now.toLocaleTimeString('ja-JP', { hour12: false });
+        document.getElementById('clockDate').textContent = now.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
+        app.updateNextClass(now);
+    },
+
+    updateNextClass: (now) => {
+        const time = now.getHours() * 60 + now.getMinutes();
+        const settings = data.adminData.timeSettings;
+        let current = null;
+
+        for (const s of settings) {
+            const [sh, sm] = s.s.split(':').map(Number);
+            const [eh, em] = s.e.split(':').map(Number);
+            if (time >= sh * 60 + sm && time <= eh * 60 + em) {
+                current = s; break;
+            }
+        }
+
+        const el = document.getElementById('nextClassDisplay');
+        if (current) el.innerHTML = `<span style="color:var(--primary)">${current.p}時間目 授業中</span>`;
+        else el.textContent = "今日の授業はありません";
+    },
+
+    renderDashboard: () => {
+        document.getElementById('headerClassName').textContent = data.userData.classId;
+        const list = document.getElementById('todoList');
+        list.innerHTML = '';
+        data.userData.todos.forEach((t, i) => {
+            const li = document.createElement('li');
+            li.textContent = t;
+            list.appendChild(li);
+        });
+    },
+
+    addTodo: () => {
+        const input = document.getElementById('newTodoInput');
+        if(!input.value) return;
+        data.userData.todos.push(input.value);
+        data.saveLocal();
+        input.value = '';
+        app.renderDashboard();
+    }
+};
+
+window.onload = app.init;
